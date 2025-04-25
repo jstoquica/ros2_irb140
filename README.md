@@ -13,7 +13,7 @@ This package provides a basic RViz2-based simulation of the ABB IRB140 industria
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Clone this Repository into a ROS 2 Workspace
 
