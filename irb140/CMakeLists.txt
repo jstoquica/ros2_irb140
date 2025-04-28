@@ -27,10 +27,10 @@ if(BUILD_TESTING)
 endif()
 
 # Install Python scripts
-#install(PROGRAMS
-#  src/trajectory_publisher.py
-#  DESTINATION lib/${PROJECT_NAME}
-#)
+install(PROGRAMS
+  launch/send_trajectory_loop.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 install(
   DIRECTORY launch meshes rviz urdf config
