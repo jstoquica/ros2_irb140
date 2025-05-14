@@ -28,7 +28,9 @@ endif()
 
 # Install Python scripts
 install(PROGRAMS
+  launch/irb140.launch.py
   launch/send_trajectory_loop.py
+  launch/trajectory_benchmark_loop.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
