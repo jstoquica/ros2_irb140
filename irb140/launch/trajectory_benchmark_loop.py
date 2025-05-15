@@ -3,67 +3,96 @@
 import rclpy
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+import subprocess
+import time
 import csv
 import os
-import time
 
-class JitterBenchmarkNode(Node):
+
+class TrajectoryBenchmarkLoop(Node):
     def __init__(self):
-        super().__init__('trajectory_jitter_node')
+        super().__init__('trajectory_benchmark_loop')
 
-        self.timer_period = 0.01  # 10ms = 100Hz
-        self.timer_ = self.create_timer(self.timer_period, self.timer_callback)
+        self.publisher_ = self.create_publisher(
+            JointTrajectory,
+            '/joint_trajectory_controller/joint_trajectory',
+            10
+        )
 
-        self.expected_time = self.get_clock().now().nanoseconds / 1e9
-        self.jitter_log = []
+        # Publish every 5 seconds
+        self.timer_ = self.create_timer(5.0, self.publish_trajectory)
 
-        self.max_duration = 10.0  # seconds
-        self.start_time = self.get_clock().now().nanoseconds / 1e9
+        self.start_time = time.time()
+        self.max_duration = 60  # Benchmark duration (seconds)
+        self.latency_log = []
+        self.output_file = f'latency_{os.uname().nodename}.csv'
+        self.mbw_log = f'memory_bandwidth_{os.uname().nodename}.txt'
 
-        self.publisher_ = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-        self.output_file = f'jitter_log_{os.uname().nodename}.csv'
-        self.logger = self.get_logger()
-        self.logger.info('Started jitter logging benchmark.')
+        self.get_logger().info('Benchmark node started...')
 
-    def timer_callback(self):
-        now = self.get_clock().now().nanoseconds / 1e9
-        elapsed = now - self.start_time
+    def publish_trajectory(self):
+        trajectory_points = [
+            [0.0, -0.5, 0.5, 0.0, 1.0, 0.0],
+            [0.3, -0.3, 0.2, 0.1, 0.8, -0.1],
+            [0.5,  0.0, -0.5, 0.5, 0.0, -0.5],
+            [0.2,  0.2, -0.2, 0.2, -0.2, 0.2],
+            [0.0,  0.0,  0.0, 0.0,  0.0, 0.0]
+        ]
 
-        # Compute jitter = actual_time - expected_time
-        jitter = (now - self.expected_time) * 1e6  # Convert to microseconds
-        self.jitter_log.append(jitter)
-        self.expected_time += self.timer_period  # Update expected time for next cycle
-
-        # Publish simple dummy trajectory
         traj = JointTrajectory()
-        traj.joint_names = [f'joint_{i+1}' for i in range(6)]
-        point = JointTrajectoryPoint()
-        point.positions = [0.0, -0.5, 0.5, 0.0, 1.0, 0.0]
-        point.time_from_start.sec = 1
-        traj.points.append(point)
-        traj.header.stamp = self.get_clock().now().to_msg()
+        traj.joint_names = [f'joint_{i}' for i in range(1, 7)]
+
+        for i, positions in enumerate(trajectory_points):
+            point = JointTrajectoryPoint()
+            point.positions = positions
+            point.time_from_start.sec = (i + 1) * 2
+            point.time_from_start.nanosec = 0
+            traj.points.append(point)
+
+        now = self.get_clock().now()
+        traj.header.stamp = now.to_msg()
+
+        # Log publishing timestamp
+        self.latency_log.append((now.nanoseconds / 1e6, 'published'))  # ms
+
         self.publisher_.publish(traj)
+        self.get_logger().info('Published trajectory with 5 points.')
 
-        self.logger.info(f'Published trajectory. Jitter: {jitter:.2f} µs')
-
-        # Stop after max_duration
+        elapsed = time.time() - self.start_time
         if elapsed >= self.max_duration:
-            self.save_results()
+            self.get_logger().info('Max duration reached. Saving logs...')
+            self.save_latency()
+            self.log_memory_bandwidth()
             rclpy.shutdown()
 
-    def save_results(self):
-        with open(self.output_file, 'w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(['Jitter (microseconds)'])
-            for value in self.jitter_log:
-                writer.writerow([value])
-        self.logger.info(f'Jitter data saved to {self.output_file}')
+    def save_latency(self):
+        with open(self.output_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Time (ms)', 'Event'])
+            writer.writerows(self.latency_log)
+        self.get_logger().info(f'Latency log saved to {self.output_file}')
+
+    def log_memory_bandwidth(self):
+        self.get_logger().info('Running mbw to log memory bandwidth...')
+        try:
+            result = subprocess.run(
+                ['mbw', '-n', '3', '128'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            with open(self.mbw_log, 'w') as f:
+                f.write(result.stdout)
+            self.get_logger().info(f'Memory bandwidth logged to {self.mbw_log}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to run mbw: {e}')
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = JitterBenchmarkNode()
+    node = TrajectoryBenchmarkLoop()
     rclpy.spin(node)
+
 
 if __name__ == '__main__':
     main()
