@@ -3,96 +3,108 @@
 import rclpy
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-import subprocess
+from std_msgs.msg import Header
+from rosgraph_msgs.msg import Clock
+import psutil
 import time
 import csv
 import os
-
 
 class TrajectoryBenchmarkLoop(Node):
     def __init__(self):
         super().__init__('trajectory_benchmark_loop')
 
-        self.publisher_ = self.create_publisher(
-            JointTrajectory,
-            '/joint_trajectory_controller/joint_trajectory',
-            10
-        )
+        self.publisher_ = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+        self.ping_pub = self.create_publisher(Header, '/benchmark/ping', 10)
+        self.pong_sub = self.create_subscription(Header, '/benchmark/pong', self.pong_callback, 10)
+        self.clock_sub = self.create_subscription(Clock, '/clock', self.clock_callback, 10)
 
-        # Publish every 5 seconds
-        self.timer_ = self.create_timer(5.0, self.publish_trajectory)
+        self.publish_timer = self.create_timer(5.0, self.publish_trajectory)
+        self.ping_timer = self.create_timer(1.0, self.send_ping)
+        self.log_timer = self.create_timer(1.0, self.log_metrics)
 
         self.start_time = time.time()
-        self.max_duration = 60  # Benchmark duration (seconds)
+        self.max_duration = 60  # seconds
+        self.sim_start = None
+        self.sim_time = None
         self.latency_log = []
-        self.output_file = f'latency_{os.uname().nodename}.csv'
-        self.mbw_log = f'memory_bandwidth_{os.uname().nodename}.txt'
+        self.output_file = 'benchmark_trajectory.csv'
+        self.process = psutil.Process(os.getpid())
 
-        self.get_logger().info('Benchmark node started...')
+        with open(self.output_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Time (s)', 'CPU Time (s)', 'Memory (MiB)', 'Latency (ms)', 'Real-Time Factor'])
+
+        self.get_logger().info('Trajectory benchmark loop node started.')
 
     def publish_trajectory(self):
-        trajectory_points = [
+        points = [
             [0.0, -0.5, 0.5, 0.0, 1.0, 0.0],
             [0.3, -0.3, 0.2, 0.1, 0.8, -0.1],
-            [0.5,  0.0, -0.5, 0.5, 0.0, -0.5],
-            [0.2,  0.2, -0.2, 0.2, -0.2, 0.2],
-            [0.0,  0.0,  0.0, 0.0,  0.0, 0.0]
+            [0.5, 0.0, -0.5, 0.5, 0.0, -0.5],
+            [0.2, 0.2, -0.2, 0.2, -0.2, 0.2],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         ]
 
         traj = JointTrajectory()
-        traj.joint_names = [f'joint_{i}' for i in range(1, 7)]
+        traj.joint_names = [f'joint_{i+1}' for i in range(6)]
 
-        for i, positions in enumerate(trajectory_points):
-            point = JointTrajectoryPoint()
-            point.positions = positions
-            point.time_from_start.sec = (i + 1) * 2
-            point.time_from_start.nanosec = 0
-            traj.points.append(point)
+        for i, pos in enumerate(points):
+            pt = JointTrajectoryPoint()
+            pt.positions = pos
+            pt.time_from_start.sec = (i + 1) * 2
+            pt.time_from_start.nanosec = 0
+            traj.points.append(pt)
 
-        now = self.get_clock().now()
-        traj.header.stamp = now.to_msg()
-
-        # Log publishing timestamp
-        self.latency_log.append((now.nanoseconds / 1e6, 'published'))  # ms
-
+        traj.header.stamp = self.get_clock().now().to_msg()
         self.publisher_.publish(traj)
         self.get_logger().info('Published trajectory with 5 points.')
 
+    def send_ping(self):
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        self.ping_pub.publish(header)
+
+    def pong_callback(self, msg):
+        now = self.get_clock().now().to_msg()
+        sent = msg.stamp.sec + msg.stamp.nanosec * 1e-9
+        received = now.sec + now.nanosec * 1e-9
+        latency_ms = (received - sent) * 1000.0
+        self.latency_log.append(latency_ms)
+
+    def clock_callback(self, msg):
+        sim_time = msg.clock.sec + msg.clock.nanosec * 1e-9
+        if self.sim_start is None:
+            self.sim_start = sim_time
+        self.sim_time = sim_time
+
+    def log_metrics(self):
         elapsed = time.time() - self.start_time
-        if elapsed >= self.max_duration:
-            self.get_logger().info('Max duration reached. Saving logs...')
-            self.save_latency()
-            self.log_memory_bandwidth()
-            rclpy.shutdown()
+        cpu_time = sum(self.process.cpu_times()[:2])  # user + system
+        mem_mib = self.process.memory_info().rss / (1024 * 1024)
+        latency = round(sum(self.latency_log) / len(self.latency_log), 3) if self.latency_log else 0.0
+        self.latency_log.clear()
 
-    def save_latency(self):
-        with open(self.output_file, 'w', newline='') as f:
+        rt_factor = round((self.sim_time - self.sim_start) / elapsed, 3) if self.sim_time and self.sim_start else 0.0
+
+        self.get_logger().info(
+            f"[{elapsed:.1f}s] CPU Time: {cpu_time:.2f}s, Mem: {mem_mib:.2f} MiB, Latency: {latency:.2f} ms, RT: {rt_factor:.2f}"
+        )
+
+        with open(self.output_file, 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Time (ms)', 'Event'])
-            writer.writerows(self.latency_log)
-        self.get_logger().info(f'Latency log saved to {self.output_file}')
+            writer.writerow([round(elapsed, 2), round(cpu_time, 2), round(mem_mib, 2), latency, rt_factor])
 
-    def log_memory_bandwidth(self):
-        self.get_logger().info('Running mbw to log memory bandwidth...')
-        try:
-            result = subprocess.run(
-                ['mbw', '-n', '3', '128'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            with open(self.mbw_log, 'w') as f:
-                f.write(result.stdout)
-            self.get_logger().info(f'Memory bandwidth logged to {self.mbw_log}')
-        except Exception as e:
-            self.get_logger().error(f'Failed to run mbw: {e}')
-
+        if elapsed >= self.max_duration:
+            self.get_logger().info('Max duration reached. Shutting down...')
+            rclpy.shutdown()
 
 def main(args=None):
     rclpy.init(args=args)
     node = TrajectoryBenchmarkLoop()
     rclpy.spin(node)
-
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
