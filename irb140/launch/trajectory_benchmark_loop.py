@@ -3,22 +3,35 @@
 import rclpy
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from sensor_msgs.msg import JointState
-from rclpy.time import Time
-from rclpy.clock import Clock, ClockType
+import psutil
+import time
+import csv
+import os
 
-class TrajectoryBenchmarkNode(Node):
+class TrajectoryBenchmarkLoop(Node):
     def __init__(self):
-        super().__init__('trajectory_benchmark_node')
+        super().__init__('trajectory_benchmark_loop')
 
-        # Joint names must match the controller exactly
-        self.joint_names = [
-            'joint_1', 'joint_2', 'joint_3',
-            'joint_4', 'joint_5', 'joint_6'
-        ]
+        # ROS 2 publisher for joint trajectories
+        self.publisher_ = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
+        
+        # Timer to publish trajectory every 5 seconds
+        self.timer_ = self.create_timer(5.0, self.publish_trajectory)
 
-        # Trajectory definition
-        self.trajectory_points = [
+        # Benchmark tracking variables
+        self.cpu_log = []
+        self.mem_log = []
+        self.start_time = time.time()
+        self.max_duration = 60  # Total benchmark duration in seconds
+        self.output_file = f'benchmark_{os.uname().nodename}.csv'
+
+        # Logger for output
+        self.logger = self.get_logger()
+        self.logger.info('Benchmark node started...')
+
+    def publish_trajectory(self):
+        # Define multiple trajectory points (5 in total)
+        trajectory_points = [
             [0.0, -0.5, 0.5, 0.0, 1.0, 0.0],
             [0.3, -0.3, 0.2, 0.1, 0.8, -0.1],
             [0.5,  0.0, -0.5, 0.5, 0.0, -0.5],
@@ -26,65 +39,55 @@ class TrajectoryBenchmarkNode(Node):
             [0.0,  0.0,  0.0, 0.0,  0.0, 0.0]
         ]
 
-        self.publisher = self.create_publisher(JointTrajectory, '/joint_trajectory_controller/joint_trajectory', 10)
-
-        timer_period = 5.0  # seconds
-        self.timer = self.create_timer(timer_period, self.publish_trajectory)
-
-        # Latency measurement
-        self.latency_list = []
-        self.latency_sample_size = 20
-        self.subscription = self.create_subscription(
-            JointState,
-            '/joint_states',
-            self.joint_state_callback,
-            10
-        )
-
-        self.get_logger().info('TrajectoryBenchmarkNode started.')
-
-    def publish_trajectory(self):
+        # Create the trajectory message
         traj = JointTrajectory()
-        traj.joint_names = self.joint_names
+        traj.joint_names = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
 
-        time_from_start = 0.0
-        for positions in self.trajectory_points:
+        # Add each point with increasing time_from_start
+        for i, positions in enumerate(trajectory_points):
             point = JointTrajectoryPoint()
             point.positions = positions
-            point.time_from_start.sec = int(time_from_start)
-            point.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
+            point.time_from_start.sec = (i + 1) * 2  # each point 2 seconds apart
+            point.time_from_start.nanosec = 0
             traj.points.append(point)
-            time_from_start += 2.0  # 2 seconds between each point
 
+        # Set the timestamp of the trajectory
         traj.header.stamp = self.get_clock().now().to_msg()
-        self.publisher.publish(traj)
-        self.get_logger().info('Trajectory published.')
 
-    def joint_state_callback(self, msg):
-        try:
-            msg_time_ros = Time.from_msg(msg.header.stamp)
-            now = Clock(clock_type=ClockType.ROS_TIME).now()
-            latency = (now - msg_time_ros).nanoseconds / 1e6  # ms
-            self.latency_list.append(latency)
+        # Publish the trajectory
+        self.publisher_.publish(traj)
+        self.get_logger().info('Published trajectory with 5 points.')
 
-            if len(self.latency_list) >= self.latency_sample_size:
-                avg_latency = sum(self.latency_list) / len(self.latency_list)
-                self.get_logger().info(f'[Latency] Avg joint_states latency: {avg_latency:.3f} ms over {self.latency_sample_size} samples')
-                self.latency_list.clear()
-        except Exception as e:
-            self.get_logger().error(f'Error in latency calculation: {e}')
+        # Log system performance metrics
+        self.log_system_usage()
 
-def main():
-    rclpy.init()
-    node = TrajectoryBenchmarkNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Stop the benchmark after max_duration
+        elapsed = time.time() - self.start_time
+        if elapsed >= self.max_duration:
+            self.get_logger().info(f'Max duration reached ({self.max_duration}s). Saving results...')
+            self.save_results()
+            rclpy.shutdown()
+
+    def log_system_usage(self):
+        """Log CPU and memory usage for benchmarking"""
+        elapsed = time.time() - self.start_time
+        cpu = psutil.cpu_percent()
+        mem = psutil.virtual_memory().percent
+        self.cpu_log.append((elapsed, cpu, mem))
+
+    def save_results(self):
+        """Save benchmarking results to a CSV file"""
+        with open(self.output_file, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Time (s)', 'CPU Usage (%)', 'Memory Usage (%)'])
+            for row in self.cpu_log:
+                writer.writerow(row)
+        self.get_logger().info(f'Benchmark data saved to {self.output_file}')
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = TrajectoryBenchmarkLoop()
+    rclpy.spin(node)
 
 if __name__ == '__main__':
     main()
-
